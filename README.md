@@ -15,12 +15,23 @@ on.
 
 ```rust
 use fuzzerang::{StandardSeedableRng, StandardBuffered, Ranged};
-use rand::SeedableRng;
+use rand::{SeedableRng, distributions::Distribution};
 
+// Use a constant seed of 8 bytes, or 64 bits
 let mut rng = StandardSeedableRng::from_seed((0..255).take(8).collect());
 let dist = StandardBuffered::new();
 
+// We can generate 10 bools from 8 bytes of input because we're only using 1 bit each
 for i in 0..10 {
-   println!("{}: {}", i, rng.sample(&dist));
+    let x: bool = dist.sample(&mut rng);
+    println!("{}: {}", i, x);
 }
+
+// In fact, we are so efficient we can generate some alphabetic characters too, which
+// each use 4 bits
+for i in 0..10 {
+    let x: char = dist.sample_range_inclusive(&mut rng, 'A'..='Z');
+    println!("{}: {}", i, x);
+}
+
 ```
