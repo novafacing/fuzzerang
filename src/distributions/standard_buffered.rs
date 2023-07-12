@@ -1,5 +1,5 @@
-use super::{Buffered, Ranged};
-use anyhow::Result;
+use super::{Buffered, Ranged, TryDistribution, TryRanged};
+use anyhow::{anyhow, Result};
 use bitvec::{order::Lsb0, vec::BitVec};
 use core::ops::{Range, RangeInclusive};
 use rand::{prelude::Distribution, Rng};
@@ -63,6 +63,14 @@ impl Distribution<bool> for StandardBuffered {
     }
 }
 
+impl TryDistribution<bool> for StandardBuffered {
+    fn try_sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<bool> {
+        // Special case: bool only requires 1 bit, even though a bool is a full byte in size
+        self.try_ensure::<R>(1, rng)?;
+        Ok(self.buf.borrow_mut().remove(0))
+    }
+}
+
 impl Distribution<char> for StandardBuffered {
     fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> char {
         self.ensure::<R>(u8::BITS as usize, rng);
@@ -72,6 +80,15 @@ impl Distribution<char> for StandardBuffered {
             .read_exact(&mut bytes)
             .expect("Failed to read into buffer");
         bytes[0] as char
+    }
+}
+
+impl TryDistribution<char> for StandardBuffered {
+    fn try_sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<char> {
+        self.try_ensure::<R>(u8::BITS as usize, rng)?;
+        let mut bytes = vec![0u8; 1];
+        self.buf.borrow_mut().read_exact(&mut bytes)?;
+        Ok(bytes[0] as char)
     }
 }
 
@@ -88,6 +105,19 @@ macro_rules! impl_distribution_integral {
                     .read_exact(&mut bytes)
                     .expect("Failed to read into buffer");
                 <$T>::from_le_bytes(bytes.as_slice().try_into().expect("Invalid bytes"))
+            }
+        }
+
+        impl TryDistribution<$T> for StandardBuffered {
+            fn try_sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Result<$T> {
+                self.try_ensure::<R>(<$T>::BITS as usize, rng)?;
+                let mut bytes = vec![0u8; size_of::<$T>()];
+                self.buf.borrow_mut().read_exact(&mut bytes)?;
+                bytes
+                    .as_slice()
+                    .try_into()
+                    .map(|a| <$T>::from_le_bytes(a))
+                    .map_err(|e| anyhow!("Invalid bytes: {}", e))
             }
         }
     };
@@ -152,6 +182,55 @@ macro_rules! impl_ranged_integral {
 
                     v += start;
                     v as $C
+                }
+            }
+        }
+
+        impl TryRanged<$C> for StandardBuffered {
+            fn try_sample_range<R: Rng + ?Sized>(
+                &self,
+                rng: &mut R,
+                range: Range<$C>,
+            ) -> Result<$C> {
+                self.try_sample_range_inclusive(rng, range.start..=(range.end as $T - 1) as $C)
+            }
+
+            fn try_sample_range_inclusive<R: Rng + ?Sized>(
+                &self,
+                rng: &mut R,
+                range: RangeInclusive<$C>,
+            ) -> Result<$C> {
+                let end = *range.end() as $T;
+                let start = *range.start() as $T;
+                // Get the size of the range
+                let range_size = end.wrapping_sub(start).wrapping_add(1) as $UT;
+
+                if range_size == 0 {
+                    self.try_sample(rng)
+                } else {
+                    // Get the number of bits needed to represent the maximum value in the range
+                    let bits_needed: u32 = range_size.ilog2() as u32 + 1;
+                    // Ensure we have enough bits in the buffer to generate a value
+                    self.try_ensure::<R>(bits_needed as usize, rng)?;
+                    // Find the maximum usable value
+                    let mut v = loop {
+                        // We can use T because we know the range is small enough to fit in T
+                        let mut v: $UT = 0;
+                        // Read bits from the buffer and OR bits into v
+                        for i in 0..bits_needed {
+                            let bit = self.buf.borrow_mut().remove(0);
+                            v |= (bit as $UT) << i;
+                        }
+
+                        if v < range_size {
+                            break v;
+                        }
+
+                        self.try_ensure::<R>(bits_needed as usize, rng)?;
+                    } as $T;
+
+                    v += start;
+                    Ok(v as $C)
                 }
             }
         }
