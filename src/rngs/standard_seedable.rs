@@ -5,6 +5,7 @@ use rand_core::{
     SeedableRng,
 };
 
+#[derive(Clone, Debug)]
 /// An RNG that generates values directly from a seed (similar to proptest's `PassThrough` RNG).
 /// This is mostly only useful in conjunction with the provided distributions like
 /// [`StandardBuffered`] because although the [`RandCore`] trait is restrictive and only allows

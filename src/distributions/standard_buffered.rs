@@ -8,6 +8,7 @@ use std::{cell::RefCell, io::Read, mem::size_of};
 pub trait StandardBufferedSample {}
 pub trait StandardBufferedSampleRange {}
 
+#[derive(Clone, Debug)]
 /// Similar to the [`rand::distributions::Standard`] distribution in that it generates
 /// values in the "expected" way for each type
 pub struct StandardBuffered {
