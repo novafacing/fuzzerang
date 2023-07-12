@@ -5,6 +5,9 @@ use core::ops::{Range, RangeInclusive};
 use rand::{prelude::Distribution, Rng};
 use std::{cell::RefCell, io::Read, mem::size_of};
 
+pub trait StandardBufferedSample {}
+pub trait StandardBufferedSampleRange {}
+
 /// Similar to the [`rand::distributions::Standard`] distribution in that it generates
 /// values in the "expected" way for each type
 pub struct StandardBuffered {
@@ -74,6 +77,8 @@ impl Distribution<char> for StandardBuffered {
 
 macro_rules! impl_distribution_integral {
     ($T:ty) => {
+        impl StandardBufferedSample for $T {}
+
         impl Distribution<$T> for StandardBuffered {
             fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> $T {
                 self.ensure::<R>(<$T>::BITS as usize, rng);
@@ -104,6 +109,8 @@ macro_rules! impl_ranged_integral {
         impl_ranged_integral! { $T, $UT, $T }
     };
     ($T:ty, $UT:ty, $C:ty) => {
+        impl StandardBufferedSampleRange for $C {}
+
         impl Ranged<$C> for StandardBuffered {
             fn sample_range<R: Rng + ?Sized>(&self, rng: &mut R, range: Range<$C>) -> $C {
                 self.sample_range_inclusive(rng, range.start..=(range.end as $T - 1) as $C)
@@ -123,18 +130,26 @@ macro_rules! impl_ranged_integral {
                     self.sample(rng)
                 } else {
                     // Get the number of bits needed to represent the maximum value in the range
-                    let bits_needed = range_size.ilog2() as usize + 1;
+                    let bits_needed: u32 = range_size.ilog2() as u32 + 1;
                     // Ensure we have enough bits in the buffer to generate a value
-                    self.ensure::<R>(bits_needed, rng);
-                    // We can use T because we know the range is small enough to fit in T
-                    let mut v: $T = 0;
-                    // Read bits from the buffer and OR bits into v
-                    for i in 0..bits_needed {
-                        let bit = self.buf.borrow_mut().remove(0);
-                        v |= (bit as $T) << i;
-                    }
-                    // TODO: Need to do better here than modulus
-                    v %= range_size as $T;
+                    self.ensure::<R>(bits_needed as usize, rng);
+                    // Find the maximum usable value
+                    let mut v = loop {
+                        // We can use T because we know the range is small enough to fit in T
+                        let mut v: $UT = 0;
+                        // Read bits from the buffer and OR bits into v
+                        for i in 0..bits_needed {
+                            let bit = self.buf.borrow_mut().remove(0);
+                            v |= (bit as $UT) << i;
+                        }
+
+                        if v < range_size {
+                            break v;
+                        }
+
+                        self.ensure::<R>(bits_needed as usize, rng);
+                    } as $T;
+
                     v += start;
                     v as $C
                 }
@@ -145,22 +160,23 @@ macro_rules! impl_ranged_integral {
 
 impl_ranged_integral! { u8, u8, char }
 impl_ranged_integral! { u8, u8 }
-impl_ranged_integral!(u16, u16);
-impl_ranged_integral!(u32, u32);
-impl_ranged_integral!(u64, u64);
-impl_ranged_integral!(usize, usize);
-impl_ranged_integral!(i8, u8);
-impl_ranged_integral!(i16, u16);
-impl_ranged_integral!(i32, u32);
-impl_ranged_integral!(i64, u64);
-impl_ranged_integral!(isize, usize);
+impl_ranged_integral! { u16, u16 }
+impl_ranged_integral! { u32, u32 }
+impl_ranged_integral! { u64, u64 }
+impl_ranged_integral! { usize, usize }
+impl_ranged_integral! { i8, u8 }
+impl_ranged_integral! { i16, u16 }
+impl_ranged_integral! { i32, u32 }
+impl_ranged_integral! { i64, u64 }
+impl_ranged_integral! { isize, usize }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{distributions::Ranged, rngs::StandardSeedableRng};
     use concat_idents::concat_idents;
-    use rand::SeedableRng;
+    use rand::{thread_rng, SeedableRng};
+    use std::iter::repeat;
 
     macro_rules! test_sample_impl {
         ($T:ty, $TN:ident) => {
@@ -237,41 +253,57 @@ mod tests {
 
     macro_rules! test_sample_rangeimpl {
         ($T:ty, $TN:ident) => {
+            concat_idents!(test_name = $TN, _one, {
+                #[test]
+                fn test_name() {
+                    const RANGE_MAX: $T = 48;
+                    const RANGE_MIN: $T = 8;
+                    const SAMPLES: usize = 1;
+                    let mut rng = StandardSeedableRng::from_seed(
+                        (0..255)
+                            .take(size_of::<$T>())
+                            .chain((0..255).rev().take(size_of::<$T>()))
+                            .collect(),
+                    );
+                    let dist = StandardBuffered::new();
+                    (0..SAMPLES).for_each(|_| {
+                        let s: $T = dist.sample_range(&mut rng, RANGE_MIN..RANGE_MAX);
+                        assert!(s < RANGE_MAX, "Unexpected value");
+                        assert!(s >= RANGE_MIN, "Unexpected value");
+                    });
+                }
+            });
+
             #[test]
             fn $TN() {
                 const RANGE_MAX: $T = 48;
                 const RANGE_MIN: $T = 8;
                 const SAMPLES: usize = 64;
-                let bytes_needed: usize = ((RANGE_MAX - RANGE_MIN).ilog2() as usize + 1) * SAMPLES;
+                let bytes_needed: usize =
+                    ((RANGE_MAX - RANGE_MIN).ilog2() as usize + 1) * SAMPLES * 2;
                 let mut rng = StandardSeedableRng::from_seed(
-                    (0..255)
-                        .take(bytes_needed / 2)
-                        .chain((0..255).rev().take(bytes_needed / 2))
-                        .collect(),
+                    repeat((0..255)).flatten().take(bytes_needed).collect(),
                 );
                 let dist = StandardBuffered::new();
-                (0..SAMPLES * 2).for_each(|_| {
+                (0..SAMPLES).for_each(|_| {
                     let s: $T = dist.sample_range(&mut rng, 0..RANGE_MAX);
                     assert!(s < RANGE_MAX, "Unexpected value");
                 });
             }
 
-            concat_idents!(test_name = $TN, _, {
+            concat_idents!(test_name = $TN, _inclusive, {
                 #[test]
                 fn test_name() {
                     const RANGE_MAX: $T = 48;
                     const RANGE_MIN: $T = 8;
                     const SAMPLES: usize = 64;
                     let bytes_needed: usize =
-                        ((RANGE_MAX - RANGE_MIN).ilog2() as usize + 1) * SAMPLES;
+                        ((RANGE_MAX - RANGE_MIN).ilog2() as usize + 1) * SAMPLES * 2;
                     let mut rng = StandardSeedableRng::from_seed(
-                        (0..255)
-                            .take(bytes_needed / 2)
-                            .chain((0..255).rev().take(bytes_needed / 2))
-                            .collect(),
+                        repeat((0..255)).flatten().take(bytes_needed).collect(),
                     );
                     let dist = StandardBuffered::new();
-                    (0..SAMPLES * 2).for_each(|_| {
+                    (0..SAMPLES).for_each(|_| {
                         let s: $T = dist.sample_range_inclusive(&mut rng, 0..=RANGE_MAX);
                         assert!(s <= RANGE_MAX, "Unexpected value");
                     });
@@ -290,4 +322,47 @@ mod tests {
     test_sample_rangeimpl!(i32, test_sample_range_i32);
     test_sample_rangeimpl!(i64, test_sample_range_i64);
     test_sample_rangeimpl!(isize, test_sample_range_isize);
+
+    macro_rules! test_sample_rangeimpl_uniform {
+        ($T:ty, $TN:ident) => {
+            #[test]
+            fn $TN() {
+                fn is_random(data: &[$T], min: $T, max: $T) -> bool {
+                    let r: f32 = (max - min) as f32;
+                    let mut counts = vec![0; r as usize];
+                    for &d in data {
+                        counts[(d - min) as usize] += 1;
+                    }
+                    let n_r = data.len() as f32 / (max - min) as f32;
+                    let chi_sq_n: f32 = counts.iter().map(|&c| (c as f32 - n_r).powi(2)).sum();
+                    let chi_sq = chi_sq_n / n_r;
+                    f32::from((chi_sq - r)).abs() <= 2.0 * f32::from(r).sqrt()
+                }
+
+                let mut trng = thread_rng();
+                const RANGE_MAX: $T = 106;
+                const RANGE_MIN: $T = 0;
+                const SAMPLES: usize = 100_000;
+                let seed = (0..SAMPLES * 2).map(|_| trng.gen()).collect::<Vec<_>>();
+                println!("Seed: {:?}", seed);
+                let mut rng = StandardSeedableRng::from_seed(seed);
+                let dist = StandardBuffered::new();
+                let sampled = (0..SAMPLES)
+                    .map(|_| dist.sample_range(&mut rng, RANGE_MIN..RANGE_MAX))
+                    .collect::<Vec<$T>>();
+                println!("Sampled: {:?}", sampled);
+                assert!(
+                    is_random(&sampled, RANGE_MIN, RANGE_MAX),
+                    "Chi2 test failed"
+                )
+            }
+        };
+    }
+
+    test_sample_rangeimpl_uniform!(u8, test_sample_range_uniform_u8);
+    test_sample_rangeimpl_uniform!(u16, test_sample_range_uniform_u16);
+    test_sample_rangeimpl_uniform!(u32, test_sample_range_uniform_u32);
+    test_sample_rangeimpl_uniform!(i8, test_sample_range_uniform_i8);
+    test_sample_rangeimpl_uniform!(i16, test_sample_range_uniform_i16);
+    test_sample_rangeimpl_uniform!(i32, test_sample_range_uniform_i32);
 }
