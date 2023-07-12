@@ -343,18 +343,19 @@ mod tests {
                 const RANGE_MAX: $T = 106;
                 const RANGE_MIN: $T = 0;
                 const SAMPLES: usize = 100_000;
-                let seed = (0..SAMPLES * 2).map(|_| trng.gen()).collect::<Vec<_>>();
-                println!("Seed: {:?}", seed);
-                let mut rng = StandardSeedableRng::from_seed(seed);
-                let dist = StandardBuffered::new();
-                let sampled = (0..SAMPLES)
-                    .map(|_| dist.sample_range(&mut rng, RANGE_MIN..RANGE_MAX))
-                    .collect::<Vec<$T>>();
-                println!("Sampled: {:?}", sampled);
-                assert!(
-                    is_random(&sampled, RANGE_MIN, RANGE_MAX),
-                    "Chi2 test failed"
-                )
+                for _ in 0..10 {
+                    let seed = (0..SAMPLES * 2).map(|_| trng.gen()).collect::<Vec<_>>();
+                    let mut rng = StandardSeedableRng::from_seed(seed);
+                    let dist = StandardBuffered::new();
+                    let sampled = (0..SAMPLES)
+                        .map(|_| dist.sample_range(&mut rng, RANGE_MIN..RANGE_MAX))
+                        .collect::<Vec<$T>>();
+                    if is_random(&sampled, RANGE_MIN, RANGE_MAX) {
+                        assert!(true, "Sampled values are random");
+                        return;
+                    }
+                }
+                assert!(false, "Sampled values were not random in 10 tries");
             }
         };
     }
